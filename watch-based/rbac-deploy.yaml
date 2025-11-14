@@ -25,13 +25,17 @@ metadata:
 spec:
   replicas: 1
   selector:
-    matchLabels: {app: my-scheduler-w}
+    matchLabels:
+      app: my-scheduler-w
   template:
     metadata:
-      labels: {app: my-scheduler-w}
+      labels:
+        app: my-scheduler-w
     spec:
       serviceAccountName: my-scheduler-w
       containers:
-      - name: scheduler
-        image: my-py-scheduler:latest
-        args: ["--scheduler-name","my-scheduler-w"]
+      - name: scheduler-w
+        image: my-py-scheduler-w:latest      
+        imagePullPolicy: Never               #  evita que Kubernetes intente bajarla de internet
+        args: ["--scheduler-name", "my-scheduler-w"]
+

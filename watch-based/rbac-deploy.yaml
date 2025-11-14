@@ -1,37 +1,37 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: my-scheduler
+  name: my-scheduler-w
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: my-scheduler-binding
+  name: my-scheduler-w-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: system:kube-scheduler
 subjects:
 - kind: ServiceAccount
-  name: my-scheduler
+  name: my-scheduler-w
   namespace: kube-system
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: my-scheduler
+  name: my-scheduler-w
   namespace: kube-system
 spec:
   replicas: 1
   selector:
-    matchLabels: {app: my-scheduler}
+    matchLabels: {app: my-scheduler-w}
   template:
     metadata:
-      labels: {app: my-scheduler}
+      labels: {app: my-scheduler-w}
     spec:
-      serviceAccountName: my-scheduler
+      serviceAccountName: my-scheduler-w
       containers:
       - name: scheduler
         image: my-py-scheduler:latest
-        args: ["--scheduler-name","my-scheduler"]
+        args: ["--scheduler-name","my-scheduler-w"]

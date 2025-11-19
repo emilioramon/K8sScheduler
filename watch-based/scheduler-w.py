@@ -1,10 +1,14 @@
-import argparse, math 
-from kubernetes import client, config, watch 
+import time
+from kubernetes import client, config, watch
+from datetime import datetime
+import argparse
 
-#python scheduler.py --scheduler-name my-scheduler_w --kubeconfig ~/.kube/config
+ROUND_ROBIN_INDEX = 0
 
-# TODO: load_client(kubeconfig) -> CoreV1Api 
-#  - Use config.load_incluster_config() by default, else config.load_kube_config() 
+
+# -----------------------------
+# Configuración de cliente K8s
+# -----------------------------
 def load_client(kubeconfig=None):
     if kubeconfig:
         config.load_kube_config(kubeconfig)
@@ -12,57 +16,74 @@ def load_client(kubeconfig=None):
         config.load_incluster_config()
     return client.CoreV1Api()
 
-# TODO: bind_pod(api, pod, node_name) 
-#  - Create a V1Binding with metadata.name=pod.name and target.kind=Node,target.name=node_name 
-#  - Call api.create_namespaced_binding(namespace, body) 
-def bind_pod(api: client.CoreV1Api, pod, node_name: str):
-    target = client.V1ObjectReference(kind="Node", name=node_name)
-    meta = client.V1ObjectMeta(name=pod.metadata.name)
-    body = client.V1Binding(target=target, metadata=meta)
-    api.create_namespaced_binding(pod.metadata.namespace, body)
-
-# TODO: choose_node(api, pod) -> str 
-#  - List nodes and pick one based on a simple policy (fewest running pods) 
-def choose_node(api: client.CoreV1Api, pod) -> str:
+# -----------------------------
+# Elegir nodo disponible
+# -----------------------------
+def choose_node(api, pod):
+    global ROUND_ROBIN_INDEX
     nodes = api.list_node().items
-    if not nodes:
-        raise RuntimeError("No nodes available")
-    pods = api.list_pod_for_all_namespaces().items
-    min_cnt = math.inf
-    pick = nodes[0].metadata.name
-    for n in nodes:
-        cnt = sum(1 for p in pods if p.spec.node_name == n.metadata.name)
-        if cnt < min_cnt:
-            min_cnt = cnt
-            pick = n.metadata.name
-    return pick
+    ready_workers = []
 
+    for n in nodes:
+        labels = n.metadata.labels or {}
+        # Excluir control-plane
+        if "node-role.kubernetes.io/control-plane" in labels:
+            continue
+        # Filtrar nodos Ready
+        conditions = {c.type: c.status for c in n.status.conditions}
+        if conditions.get("Ready") == "True":
+            ready_workers.append(n.metadata.name)
+
+    if not ready_workers:
+        return None
+
+    # Round-robin
+    node = ready_workers[ROUND_ROBIN_INDEX % len(ready_workers)]
+    ROUND_ROBIN_INDEX += 1
+    return node
+
+# -----------------------------
+# Bindeo seguro de pods
+# -----------------------------
+def bind_pod(api, pod, node_name):
+    if node_name is None:
+        raise ValueError("Invalid value for `target`, must not be `None`")
+    target = client.V1ObjectReference(api_version="v1", kind="Node", name=node_name)
+    meta = client.V1ObjectMeta(name=pod.metadata.name, namespace=pod.metadata.namespace)
+    body = client.V1Binding(metadata=meta, target=target)
+    api.create_namespaced_binding(namespace=pod.metadata.namespace, body=body)
+
+# -----------------------------
+# Main scheduler
+# -----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scheduler-name", default="my-scheduler-w")
-    parser.add_argument("--kubeconfig", default=None)     
-    args = parser.parse_args() 
+    parser.add_argument("--scheduler-name", required=True, help="Nombre de tu scheduler")
+    parser.add_argument("--kubeconfig", default=None, help="Ruta al kubeconfig (opcional)")
+    args = parser.parse_args()
 
-    api = load_client(args.kubeconfig) 
+    api = load_client(args.kubeconfig)
+    print(f"[watch-student] scheduler starting… name={args.scheduler_name}")
 
-    print(f"[watch-student] scheduler starting… name= {args.scheduler_name}")     
-    w = watch.Watch() 
-    # Stream Pod events across all namespaces 
-    for evt in w.stream(client.CoreV1Api().list_pod_for_all_namespaces, _request_timeout=60):
-        obj = evt['object'] 
-        if obj is None or not hasattr(obj, 'spec'): continue 
-        # TODO: Only act on Pending pods that target our schedulerName 
-        #  - if obj.spec.node_name is not set and obj.spec.scheduler_name == args.scheduler_name: 
-        #        node = choose_node(api, obj) 
-        #        bind_pod(api, obj, node) 
-        #        print(...) 
-        if obj.spec.node_name is None and obj.spec.scheduler_name == args.scheduler_name:
+    w = watch.Watch()
+
+    for event in w.stream(api.list_pod_for_all_namespaces, _request_timeout=60):
+        pod = event['object']
+        if pod is None or not hasattr(pod, 'spec'):
+            continue
+
+        # Solo pods pendientes asignados a este scheduler
+        if pod.spec.node_name is None and pod.spec.scheduler_name == args.scheduler_name:
             try:
-                api = load_client(args.kubeconfig)
-                node = choose_node(api, obj)
-                bind_pod(api, obj, node)
-                print(f"Bound {obj.metadata.namespace}/{obj.metadata.name} -> {node}")
+                node = choose_node(api, pod)
+                if node is None:
+                    print(f"[{datetime.now()}] No nodes Ready for pod {pod.metadata.name}, skipping")
+                    continue
+                bind_pod(api, pod, node)
+                print(f"[{datetime.now()}] Bound {pod.metadata.namespace}/{pod.metadata.name} -> {node}")
             except Exception as e:
-                print("error:", e)
+                print(f"[{datetime.now()}] error binding pod {pod.metadata.namespace}/{pod.metadata.name}: {e}")
 
-if __name__ == "__main__":     main() 
+
+if __name__ == "__main__":
+    main()

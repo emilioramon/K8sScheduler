@@ -1,9 +1,30 @@
+# ------------------------------
+# ServiceAccount
+# ------------------------------
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: my-scheduler-w
   namespace: kube-system
 ---
+# ------------------------------
+# ClusterRole con permisos mínimos
+# ------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: my-scheduler-w-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["bindings"]
+    verbs: ["create"]
+---
+# ------------------------------
+# ClusterRoleBinding
+# ------------------------------
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -11,12 +32,15 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: system:kube-scheduler
+  name: my-scheduler-w-role
 subjects:
-- kind: ServiceAccount
-  name: my-scheduler-w
-  namespace: kube-system
+  - kind: ServiceAccount
+    name: my-scheduler-w
+    namespace: kube-system
 ---
+# ------------------------------
+# Deployment del scheduler
+# ------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,8 +58,9 @@ spec:
     spec:
       serviceAccountName: my-scheduler-w
       containers:
-      - name: scheduler-w
-        image: my-py-scheduler-w:latest      
-        imagePullPolicy: Never               #  evita que Kubernetes intente bajarla de internet
-        args: ["--scheduler-name", "my-scheduler-w"]
+        - name: scheduler-w
+          image: my-py-scheduler-w:latest
+          imagePullPolicy: Never   # usa imagen local
+          args: ["--scheduler-name", "my-scheduler-w"]
+
 

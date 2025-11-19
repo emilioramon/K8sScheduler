@@ -1,0 +1,268 @@
+
+import argparse, math 
+from kubernetes import client, config, watch 
+import time
+import random
+from functools import wraps
+
+
+# -----------------------------
+# Configuración de cliente K8s
+# -----------------------------
+def load_client(kubeconfig=None):
+    if kubeconfig:
+        config.load_kube_config(kubeconfig)
+    else:
+        config.load_incluster_config()
+    return client.CoreV1Api()
+
+# -----------------------------
+# Filtrar nodos por etiquetas
+# -----------------------------
+def filter_nodes_by_labels(api: client.CoreV1Api, pod, required_labels: dict):
+    # Retorna solo nodos que tienen todas las etiquetas con los valores correctos
+    # Si no se requieren etiquetas, retorna todos los nodos
+    # Ejemplo de uso - hacer scheduling solo en nodos de producción
+    # required_labels = {"env": "prod", "tier": "backend"}
+    # filtered_nodes = filter_nodes_by_labels(api, pod, required_labels)
+
+    all_nodes = api.list_node().items
+    filtered_nodes = []
+    
+    # Chequeo cada nodo por etiquetas requeridas
+    for node in all_nodes:
+        node_labels = node.metadata.labels or {}
+        matches_all = True
+        # Verificar que todas las etiquetas requeridas estén presentes y coincidan
+        for key, value in required_labels.items():
+            if key not in node_labels or node_labels[key] != value:
+                matches_all = False
+                break
+        # Si todas las etiquetas coinciden, incluir nodo
+        if matches_all:
+            filtered_nodes.append(node)
+    
+    print(f"Label filtering: {len(all_nodes)} -> {len(filtered_nodes)} nodes")
+    return filtered_nodes
+
+# -----------------------------
+# Filtrar nodos por tolerancia a taints
+# -----------------------------
+def node_tolerates_taints(node, pod):
+    # Chequeo si el pod tolera todos los taints del nodo
+    taints = node.spec.taints or []
+    tolerations = pod.spec.tolerations or []
+    
+    if not taints:
+        return True
+    # Chequeo cada taint contra las tolerancias del pod
+    for taint in taints:
+        tolerated = False
+        # Chequeo cada tolerancia
+        for tol in tolerations:
+            # Chequeo si la tolerancia coincide con el taint
+            key_match = tol.key == taint.key
+            effect_match = (tol.effect == taint.effect or tol.effect == "NoExecute" or  tol.effect is None)
+            # Evaluar basado en operador
+            if tol.operator == "Exists":
+                if key_match and effect_match:
+                    tolerated = True
+                    break
+            elif tol.operator == "Equal":
+                if (key_match and effect_match and 
+                    tol.value == taint.value):
+                    tolerated = True
+                    break
+        # Si no se encontró tolerancia para este taint, el nodo no es tolerado
+        if not tolerated:
+            print(f"Node {node.metadata.name} rejected due to taint {taint.key}={taint.value}:{taint.effect}")
+            return False
+            
+    return True
+
+def filter_nodes_by_taints(nodes, pod):
+    # Filtrar nodos basados en tolerancia a taints
+    tolerable_nodes = []
+    # Chequea cada nodo por tolerancia a taints
+    for node in nodes:
+        if node_tolerates_taints(node, pod):
+            tolerable_nodes.append(node)
+    
+    print(f"Taint filtering: {len(nodes)} -> {len(tolerable_nodes)} nodes")
+    return tolerable_nodes
+
+
+# -----------------------------
+# Funciones de retry con backoff exponencial
+# -----------------------------
+
+def exponential_backoff(retries=5, base_delay=1.0, max_delay=30.0):
+    """Decorator for exponential backoff retry logic"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            for attempt in range(retries):
+                try:
+                    return func(*args, **kwargs)
+                except client.rest.ApiException as e:
+                    if e.status in [500, 502, 503, 504]:  # Retry on server errors
+                        if attempt == retries - 1:
+                            raise
+                        
+                        jitter = random.uniform(0, 0.1 * delay)
+                        sleep_time = min(delay + jitter, max_delay)
+                        
+                        print(f"API error (attempt {attempt + 1}/{retries}): {e}. Retrying in {sleep_time:.1f}s")
+                        time.sleep(sleep_time)
+                        delay *= 2  # Backoff exponencial
+                    else:
+                        raise  # No hacer retry en errores de cliente
+                except Exception as e:
+                    print(f"Unexpected error: {e}")
+                    raise
+                    
+            raise Exception(f"Failed after {retries} retries")
+        return wrapper
+    return decorator
+
+@exponential_backoff(retries=3, base_delay=1.0)
+def bind_pod_with_retry(api: client.CoreV1Api, pod, node_name: str):
+    """Bind pod with automatic retry on transient failures"""
+    target = client.V1ObjectReference(kind="Node", name=node_name)
+    meta = client.V1ObjectMeta(name=pod.metadata.name)
+    body = client.V1Binding(target=target, metadata=meta)
+    api.create_namespaced_binding(pod.metadata.namespace, body)
+
+def calculate_spread_score(node, pods, pod_labels_to_spread):
+    """Calculate score based on pod distribution across nodes"""
+    running_pods = [p for p in pods if p.spec.node_name == node.metadata.name]
+    
+    if not running_pods:
+        return 100  # Prefer empty nodes
+    
+    # Contar pods con etiquetas similares
+    similar_pod_count = 0
+    for running_pod in running_pods:
+        running_labels = running_pod.metadata.labels or {}
+        matches = True
+        for key, value in pod_labels_to_spread.items():
+            if running_labels.get(key) != value:
+                matches = False
+                break
+        if matches:
+            similar_pod_count += 1
+    
+    # Menos pods similares -> mejor puntaje
+    spread_score = max(0, 100 - (similar_pod_count * 20))
+    return spread_score
+
+def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
+    """Choose node considering spread policy"""
+    nodes = api.list_node().items
+    pods = api.list_pod_for_all_namespaces().items
+    
+    if not nodes:
+        raise RuntimeError("No nodes available")
+    
+    # Aplicar filtro de etiquetas si es necesario
+    if spread_labels:
+        nodes = filter_nodes_by_labels(api, pod, spread_labels)
+    
+    nodes = filter_nodes_by_taints(nodes, pod)
+    
+    if not nodes:
+        raise RuntimeError("No nodes match filtering criteria")
+    
+    # Scoring de nodos basado en múltiples factores
+    best_score = -1
+    best_node = None
+    
+    for node in nodes:
+        # Cargar el score (preferir nodos menos cargados)
+        pod_count = sum(1 for p in pods if p.spec.node_name == node.metadata.name)
+        load_score = max(0, 100 - (pod_count * 10))
+        
+        # Dispersión de pods
+        spread_score = 50  # Default neutral score
+        if spread_labels:
+            spread_score = calculate_spread_score(node, pods, spread_labels)
+        
+        # Score conbinado (weighted)
+        total_score = (load_score * 0.6) + (spread_score * 0.4)
+        
+        print(f"Node {node.metadata.name}: load_score={load_score}, spread_score={spread_score}, total={total_score:.1f}")
+        
+        if total_score > best_score:
+            best_score = total_score
+            best_node = node.metadata.name
+    
+    return best_node
+
+def choose_node_enhanced(api: client.CoreV1Api, pod) -> str:
+    """Enhanced node selection with all features"""
+    
+    # Definir políticas de scheduling
+    required_labels = {"env": "prod"}  
+    spread_policy = {"app": pod.metadata.labels.get("app")} if pod.metadata.labels else None
+    
+    try:
+        # Obtener y filtrar nodos
+        all_nodes = api.list_node().items
+        print(f"Total nodes available: {len(all_nodes)}")
+        
+        # Filtrado por etiquetas
+        label_filtered = filter_nodes_by_labels(api, pod, required_labels)
+        
+        # Filtrado de taints
+        taint_filtered = filter_nodes_by_taints(label_filtered, pod)
+        
+        if not taint_filtered:
+            raise RuntimeError("No nodes satisfy label and taint requirements")
+        
+        # Elegir nodo considerando política de dispersión
+        chosen_node = choose_node_with_spread(api, pod, spread_policy)
+        
+        return chosen_node
+        
+    except Exception as e:
+        print(f"Node selection error: {e}")
+        raise
+
+def main_enhanced():
+    """Enhanced scheduler main function"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scheduler-name", default="enhanced-scheduler-e")
+    parser.add_argument("--kubeconfig", default=None)
+    args = parser.parse_args()
+
+    api = load_client(args.kubeconfig)
+    print(f"Enhanced scheduler starting...")
+    
+    w = watch.Watch()
+    
+    for event in w.stream(api.list_pod_for_all_namespaces, timeout_seconds=60):
+        obj = event['object']
+        
+        # Solo manejar pods pendientes asignados a este scheduler
+        if obj is None or not hasattr(obj, 'spec'):
+            continue
+        
+        # Verificar condiciones de scheduling
+        if (obj.status.phase == "Pending" and 
+            hasattr(obj.spec, 'scheduler_name') and 
+            obj.spec.scheduler_name == args.scheduler_name and
+            obj.spec.node_name is None):
+            
+            print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
+            
+            try:
+                node = choose_node_enhanced(api, obj)
+                bind_pod_with_retry(api, obj, node)
+                print(f"Successfully scheduled {obj.metadata.name} -> {node}")
+                
+            except Exception as e:
+                print(f"Failed to schedule pod {obj.metadata.name}: {e}")
+
+if __name__ == "__main__":
+    main_enhanced()

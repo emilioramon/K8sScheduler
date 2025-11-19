@@ -1,4 +1,4 @@
-## Enhanced Scheduler Architecture & Flow
+## Scheduler Architecture & Flow - Enhanced Scheduler Architecture & Flow
 
 ```mermaid
 flowchart TD

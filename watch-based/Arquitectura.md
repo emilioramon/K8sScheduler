@@ -1,22 +1,36 @@
-## Flowchart: Custom Watch-Based Kubernetes Scheduler
+```markdown
+## Architecture Diagram
 
 ```mermaid
-flowchart TD
+graph LR
+    subgraph User
+        A[Developer creates Pod with schedulerName=my-scheduler-w]
+    end
 
-    A([Start Scheduler]) --> B[Load kubeconfig or in-cluster config]
-    B --> C[Initialize CoreV1Api client]
-    C --> D[Start Watch stream on all Pods]
+    subgraph Scheduler
+        B[load_client - load kubeconfig or in-cluster]
+        C[watch.Watch - stream Pod events]
+        D[choose_node - pick node with fewest Pods]
+        E[bind_pod - create V1Binding]
+    end
 
-    D --> E{Event has Pod object?}
-    E -- No --> D
-    E -- Yes --> F{Pod is Pending AND<br/>schedulerName matches?}
+    subgraph KubernetesAPI
+        F[(API Server)]
+    end
 
-    F -- No --> D
-    F -- Yes --> G[choose_node(): list nodes and count pods]
-    G --> H[Select node with fewest running Pods]
+    subgraph ClusterNodes
+        N1((Node 1))
+        N2((Node 2))
+        N3((Node 3))
+    end
 
-    H --> I[bind_pod():<br/>Create V1Binding object]
-    I --> J[Send binding to Kubernetes API]
+    A -->|Creates Pod| F
+    F -->|Sends Pod events| C
 
-    J --> K[Print binding result]
-    K --> D
+    C -->|Pending & scheduler matches| D
+    D -->|Selected node| E
+    E -->|POST /binding| F
+
+    F --> N1
+    F --> N2
+    F --> N3

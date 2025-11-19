@@ -1,4 +1,4 @@
-## Scheduler Architecture & Flow
+## Watch-based Scheduler Architecture & Flow
 
 ```mermaid
 flowchart TD

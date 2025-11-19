@@ -39,7 +39,7 @@ def choose_node(api: client.CoreV1Api, pod) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scheduler-name", default="my-scheduler")
+    parser.add_argument("--scheduler-name", default="my-scheduler-w")
     parser.add_argument("--kubeconfig", default=None)     
     args = parser.parse_args() 
 

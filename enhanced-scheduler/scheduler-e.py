@@ -269,10 +269,10 @@ def main_enhanced():
                 continue
 
         if (obj.status.phase == "Pending" and
-                getattr(obj.spec, 'scheduler_name', None) == args.scheduler_name and
-                getattr(obj.spec, 'node_name', None) is None):
+             getattr(obj.spec, 'scheduler_name', None) == args.scheduler_name and
+             getattr(obj.spec, 'node_name', None) is None):
 
-                print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
+             print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
              try:
                  node = choose_node_enhanced(api, obj)
 
@@ -286,7 +286,7 @@ def main_enhanced():
                     continue
                  bind_pod_with_retry(api, obj, node)
                  print(f"Successfully scheduled {obj.metadata.name} -> {node}")
-            except Exception as e:
+             except Exception as e:
                 print(f"Failed to schedule pod {obj.metadata.name}: {e}")
              
 

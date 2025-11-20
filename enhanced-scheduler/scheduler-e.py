@@ -4,6 +4,7 @@ from kubernetes import client, config, watch
 import time
 import random
 from functools import wraps
+from kubernetes.client import V1Binding, V1ObjectMeta, V1ObjectReference
 
 
 # -----------------------------
@@ -127,12 +128,33 @@ def exponential_backoff(retries=5, base_delay=1.0, max_delay=30.0):
     return decorator
 
 @exponential_backoff(retries=3, base_delay=1.0)
-def bind_pod_with_retry(api: client.CoreV1Api, pod, node_name: str):
-    """Bind pod with automatic retry on transient failures"""
-    target = client.V1ObjectReference(kind="Node", name=node_name)
-    meta = client.V1ObjectMeta(name=pod.metadata.name)
-    body = client.V1Binding(target=target, metadata=meta)
-    api.create_namespaced_binding(pod.metadata.namespace, body)
+def bind_pod_with_retry(api, pod, target):
+    # --- VALIDACIÓN CRÍTICA ---
+    if target is None:
+        raise ValueError("bind_pod_with_retry() received None as target")
+
+    try:
+        body = client.V1Binding(
+            metadata=client.V1ObjectMeta(name=pod.metadata.name),
+            target=client.V1ObjectReference(
+                kind="Node",
+                api_version="v1",
+                name=target
+            )
+        )
+
+        api.create_namespaced_binding(
+            namespace=pod.metadata.namespace,
+            body=body
+        )
+
+        print(f"Pod {pod.metadata.name} bound successfully to **{target}**")
+        return True
+
+    except Exception as e:
+        print(f"ERROR during bind for pod {pod.metadata.name}: {e}")
+        raise
+
 
 def calculate_spread_score(node, pods, pod_labels_to_spread):
     """Calculate score based on pod distribution across nodes"""
@@ -238,31 +260,35 @@ def main_enhanced():
 
     api = load_client(args.kubeconfig)
     print(f"Enhanced scheduler starting...")
-    
+
     w = watch.Watch()
-    
+
     for event in w.stream(api.list_pod_for_all_namespaces, timeout_seconds=60):
-        obj = event['object']
-        
-        # Solo manejar pods pendientes asignados a este scheduler
-        if obj is None or not hasattr(obj, 'spec'):
-            continue
-        
-        # Verificar condiciones de scheduling
-        if (obj.status.phase == "Pending" and 
-            hasattr(obj.spec, 'scheduler_name') and 
-            obj.spec.scheduler_name == args.scheduler_name and
-            obj.spec.node_name is None):
-            
-            print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
-            
-            try:
-                node = choose_node_enhanced(api, obj)
-                bind_pod_with_retry(api, obj, node)
-                print(f"Successfully scheduled {obj.metadata.name} -> {node}")
-                
+        obj = event.get('object')
+        if obj is None or not hasattr(obj, 'spec') or not hasattr(obj, 'metadata'):
+                continue
+
+        if (obj.status.phase == "Pending" and
+                getattr(obj.spec, 'scheduler_name', None) == args.scheduler_name and
+                getattr(obj.spec, 'node_name', None) is None):
+
+                print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
+             try:
+                 node = choose_node_enhanced(api, obj)
+
+                   # --- VALIDACIÓN ADICIONAL ---
+                 print(f"[DEBUG] node before bind: {node}")
+                 if node is None:
+                     print(f"[ERROR] node is None for pod {obj.metadata.name} — cannot bind")
+                     continue
+                 if not hasattr(node, "metadata") or not hasattr(node.metadata, "name"):
+                    print(f"[ERROR] node object is malformed: {node}")
+                    continue
+                 bind_pod_with_retry(api, obj, node)
+                 print(f"Successfully scheduled {obj.metadata.name} -> {node}")
             except Exception as e:
                 print(f"Failed to schedule pod {obj.metadata.name}: {e}")
+             
 
 if __name__ == "__main__":
     main_enhanced()

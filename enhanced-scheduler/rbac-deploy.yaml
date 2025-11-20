@@ -1,0 +1,66 @@
+# ------------------------------
+# ServiceAccount
+# ------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-scheduler-e
+  namespace: kube-system
+---
+# ------------------------------
+# ClusterRole con permisos mínimos
+# ------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: my-scheduler-e-role
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["bindings"]
+    verbs: ["create"]
+---
+# ------------------------------
+# ClusterRoleBinding
+# ------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: my-scheduler-e-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: my-scheduler-e-role
+subjects:
+  - kind: ServiceAccount
+    name: my-scheduler-e
+    namespace: kube-system
+---
+# ------------------------------
+# Deployment del scheduler
+# ------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-scheduler-e
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-scheduler-e
+  template:
+    metadata:
+      labels:
+        app: my-scheduler-e
+    spec:
+      serviceAccountName: my-scheduler-e
+      containers:
+        - name: scheduler-e
+          image: my-py-scheduler-e:latest
+          imagePullPolicy: Never   # usa imagen local
+          args: ["--scheduler-name", "my-scheduler-e"]
+
+

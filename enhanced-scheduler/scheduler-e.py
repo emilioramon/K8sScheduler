@@ -20,7 +20,7 @@ def load_client(kubeconfig=None):
 # -----------------------------
 # Filtrar nodos por etiquetas
 # -----------------------------
-def filter_nodes_by_labels(api: client.CoreV1Api, pod, required_labels: dict):
+def filter_nodes_by_labels(api: client.CoreV1Api, required_labels: dict):
     # Retorna solo nodos que tienen todas las etiquetas con los valores correctos
     # Si no se requieren etiquetas, retorna todos los nodos
     # Ejemplo de uso - hacer scheduling solo en nodos de producción
@@ -49,7 +49,7 @@ def filter_nodes_by_labels(api: client.CoreV1Api, pod, required_labels: dict):
 # -----------------------------
 # Filtrar nodos por tolerancia a taints
 # -----------------------------
-def node_tolerates_taints(node, pod):
+def node_tolerates_taints(node: client.V1Node, pod: client.V1Pod) -> bool:
     # Chequeo si el pod tolera todos los taints del nodo
     taints = node.spec.taints or []
     tolerations = pod.spec.tolerations or []
@@ -81,7 +81,7 @@ def node_tolerates_taints(node, pod):
             
     return True
 
-def filter_nodes_by_taints(nodes, pod):
+def filter_nodes_by_taints(nodes, pod: client.V1Pod):
     # Filtrar nodos basados en tolerancia a taints
     tolerable_nodes = []
     # Chequea cada nodo por tolerancia a taints
@@ -96,72 +96,67 @@ def filter_nodes_by_taints(nodes, pod):
 # -----------------------------
 # Funciones de retry con backoff exponencial
 # -----------------------------
-
-def exponential_backoff(retries=5, base_delay=1.0, max_delay=30.0):
-    """Decorator for exponential backoff retry logic"""
+def exponential_backoff(retries=3, base_delay=1.0, factor=2.0):
+    """
+    Decorador para reintentos con backoff exponencial.
+    """
     def decorator(func):
-        @wraps(func)
         def wrapper(*args, **kwargs):
             delay = base_delay
-            for attempt in range(retries):
+            for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
                 except client.rest.ApiException as e:
-                    if e.status in [500, 502, 503, 504]:  # Retry on server errors
-                        if attempt == retries - 1:
-                            raise
-                        
-                        jitter = random.uniform(0, 0.1 * delay)
-                        sleep_time = min(delay + jitter, max_delay)
-                        
-                        print(f"API error (attempt {attempt + 1}/{retries}): {e}. Retrying in {sleep_time:.1f}s")
-                        time.sleep(sleep_time)
-                        delay *= 2  # Backoff exponencial
-                    else:
-                        raise  # No hacer retry en errores de cliente
-                except Exception as e:
-                    print(f"Unexpected error: {e}")
-                    raise
-                    
-            raise Exception(f"Failed after {retries} retries")
+                    print(f"[WARNING] Attempt {attempt} failed: {e}")
+                    if attempt == retries:
+                        raise
+                    print(f"[INFO] Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    delay *= factor
         return wrapper
     return decorator
 
 @exponential_backoff(retries=3, base_delay=1.0)
-def bind_pod_with_retry(api, pod, target):
-    # --- VALIDACIÓN CRÍTICA ---
-    if target is None:
+def bind_pod_with_retry(api: client.CoreV1Api, pod, target_name: str):
+    """
+    Hace binding de un pod a un nodo con reintentos y backoff exponencial.
+    """
+    if target_name is None:
         raise ValueError("bind_pod_with_retry() received None as target")
 
-    try:
-        body = client.V1Binding(
-            metadata=client.V1ObjectMeta(name=pod.metadata.name),
-            target=client.V1ObjectReference(
-                kind="Node",
-                api_version="v1",
-                name=target
-            )
-        )
+    print(f"[DEBUG] Binding pod {pod.metadata.name} to node {target_name}...")
 
+    # Crear Binding
+    binding = {
+        "apiVersion": "v1",
+        "kind": "Binding",
+        "metadata": {"name": pod.metadata.name},
+        "target": {
+            "apiVersion": "v1",
+            "kind": "Node",
+            "name": target_name
+        }
+    }
+
+    try:
+        # Hacer el bind del pod al nodo
         api.create_namespaced_binding(
             namespace=pod.metadata.namespace,
-            body=body
+            body=binding
         )
-
-        print(f"Pod {pod.metadata.name} bound successfully to **{target}**")
+        print(f"[OK] Pod {pod.metadata.name} bound successfully to {target_name}")
         return True
 
-    except Exception as e:
-        print(f"ERROR during bind for pod {pod.metadata.name}: {e}")
-        raise
-
-
+    except client.rest.ApiException as e:
+        #print(f"[ERROR] Failed binding pod {pod.metadata.name}: {e}")
+        #raise
+    
 def calculate_spread_score(node, pods, pod_labels_to_spread):
-    """Calculate score based on pod distribution across nodes"""
+    # Lista de pods corriendo en el nodo
     running_pods = [p for p in pods if p.spec.node_name == node.metadata.name]
     
     if not running_pods:
-        return 100  # Prefer empty nodes
+        return 100  # Si el nodo esta vacio, devuelve el puntaje maximo
     
     # Contar pods con etiquetas similares
     similar_pod_count = 0
@@ -179,8 +174,9 @@ def calculate_spread_score(node, pods, pod_labels_to_spread):
     spread_score = max(0, 100 - (similar_pod_count * 20))
     return spread_score
 
+#Elegir nodo considerando política de dispersión
 def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
-    """Choose node considering spread policy"""
+    
     nodes = api.list_node().items
     pods = api.list_pod_for_all_namespaces().items
     
@@ -189,8 +185,8 @@ def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
     
     # Aplicar filtro de etiquetas si es necesario
     if spread_labels:
-        nodes = filter_nodes_by_labels(api, pod, spread_labels)
-    
+        nodes = filter_nodes_by_labels(api, spread_labels)
+    # Elimina nodos que no son tolerados por el pod
     nodes = filter_nodes_by_taints(nodes, pod)
     
     if not nodes:
@@ -201,12 +197,13 @@ def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
     best_node = None
     
     for node in nodes:
-        # Cargar el score (preferir nodos menos cargados)
+        # Numero de pods en el nodo (carga)
         pod_count = sum(1 for p in pods if p.spec.node_name == node.metadata.name)
+        #Penaliza nodos con mas pods
         load_score = max(0, 100 - (pod_count * 10))
         
         # Dispersión de pods
-        spread_score = 50  # Default neutral score
+        spread_score = 50  # Puntaje base si no hay política de dispersión
         if spread_labels:
             spread_score = calculate_spread_score(node, pods, spread_labels)
         
@@ -215,14 +212,18 @@ def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
         
         print(f"Node {node.metadata.name}: load_score={load_score}, spread_score={spread_score}, total={total_score:.1f}")
         
-        if total_score > best_score:
+        if total_score >= best_score:
             best_score = total_score
             best_node = node.metadata.name
     
+    if not best_node:
+        raise RuntimeError("Failed to select a node")
+
+    
     return best_node
 
+# Selección de nodo mejorada
 def choose_node_enhanced(api: client.CoreV1Api, pod) -> str:
-    """Enhanced node selection with all features"""
     
     # Definir políticas de scheduling
     required_labels = {"env": "prod"}  
@@ -234,7 +235,10 @@ def choose_node_enhanced(api: client.CoreV1Api, pod) -> str:
         print(f"Total nodes available: {len(all_nodes)}")
         
         # Filtrado por etiquetas
-        label_filtered = filter_nodes_by_labels(api, pod, required_labels)
+        label_filtered = filter_nodes_by_labels(api, required_labels)
+        
+        if not label_filtered:
+            raise RuntimeError("No nodes satisfy label requirements")
         
         # Filtrado de taints
         taint_filtered = filter_nodes_by_taints(label_filtered, pod)
@@ -244,6 +248,11 @@ def choose_node_enhanced(api: client.CoreV1Api, pod) -> str:
         
         # Elegir nodo considerando política de dispersión
         chosen_node = choose_node_with_spread(api, pod, spread_policy)
+
+        if chosen_node is None:
+            raise RuntimeError("No node could be chosen after scoring")
+        
+        print(f"[DEBUG] Chosen node: {chosen_node}")
         
         return chosen_node
         
@@ -274,18 +283,17 @@ def main_enhanced():
 
              print(f"Scheduling pod: {obj.metadata.namespace}/{obj.metadata.name}")
              try:
-                 node = choose_node_enhanced(api, obj)
-
-                   # --- VALIDACIÓN ADICIONAL ---
-                 print(f"[DEBUG] node before bind: {node}")
-                 if node is None:
-                     print(f"[ERROR] node is None for pod {obj.metadata.name} — cannot bind")
+                 node_name = choose_node_enhanced(api, obj)
+                 print(f"[DEBUG] node_name resolved: {node_name}")
+                 print(f"[DEBUG] pod.metadata.name: {obj.metadata.name}")
+                 print(f"[DEBUG] node before bind: {node_name}")
+                 if not node_name or not obj.metadata.name:
+                     print(f"[ERROR] Cannot bind pod: node_name={node_name}, pod_name={obj.metadata.name}")
                      continue
-                 if not hasattr(node, "metadata") or not hasattr(node.metadata, "name"):
-                    print(f"[ERROR] node object is malformed: {node}")
-                    continue
-                 bind_pod_with_retry(api, obj, node)
-                 print(f"Successfully scheduled {obj.metadata.name} -> {node}")
+                 
+                 bind_pod_with_retry(api, obj, node_name)
+                 print(f"Successfully scheduled {obj.metadata.name} -> {node_name}")
+
              except Exception as e:
                 print(f"Failed to schedule pod {obj.metadata.name}: {e}")
              

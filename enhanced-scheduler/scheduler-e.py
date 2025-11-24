@@ -149,8 +149,9 @@ def bind_pod_with_retry(api: client.CoreV1Api, pod, target_name: str):
         return True
 
     except client.rest.ApiException as e:
-       ''' print(f"[ERROR] Failed binding pod {pod.metadata.name}: {e}")
-        raise '''
+        print(f"[ERROR] Failed binding pod {pod.metadata.name}: {e}")
+
+        raise
     
 def calculate_spread_score(node, pods, pod_labels_to_spread):
     # Lista de pods corriendo en el nodo

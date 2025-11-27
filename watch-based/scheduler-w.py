@@ -47,11 +47,12 @@ def choose_node(api, pod):
 # -----------------------------
 def bind_pod(api, pod, node_name):
     if node_name is None:
-        raise ValueError("Invalid value for `target`, must not be `None`")
+        print(f"[{datetime.now()}] No node available for pod {pod.metadata.name}, skipping bind")
+        return
     target = client.V1ObjectReference(api_version="v1", kind="Node", name=node_name)
     meta = client.V1ObjectMeta(name=pod.metadata.name, namespace=pod.metadata.namespace)
     body = client.V1Binding(metadata=meta, target=target)
-    api.create_namespaced_binding(namespace=pod.metadata.namespace, body=body)
+    api.create_namespaced_binding(namespace=pod.metadata.namespace, body=body,_preload_content=False)
 
 # -----------------------------
 # Main scheduler
@@ -67,7 +68,7 @@ def main():
 
     w = watch.Watch()
 
-    for event in w.stream(api.list_pod_for_all_namespaces, _request_timeout=60):
+    for event in w.stream(api.list_pod_for_all_namespaces):
         pod = event['object']
         if pod is None or not hasattr(pod, 'spec'):
             continue

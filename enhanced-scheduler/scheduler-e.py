@@ -214,7 +214,7 @@ def choose_node_with_spread(api: client.CoreV1Api, pod, spread_labels=None):
         
         print(f"Node {node.metadata.name}: load_score={load_score}, spread_score={spread_score}, total={total_score:.1f}")
         
-        if total_score >= best_score:
+        if total_score > best_score:
             best_score = total_score
             best_node = node.metadata.name
     
@@ -274,7 +274,7 @@ def main_enhanced():
 
     w = watch.Watch()
 
-    for event in w.stream(api.list_pod_for_all_namespaces, timeout_seconds=60):
+    for event in w.stream(api.list_pod_for_all_namespaces):
         obj = event.get('object')
         if obj is None or not hasattr(obj, 'spec') or not hasattr(obj, 'metadata'):
                 continue

@@ -16,8 +16,8 @@ metadata:
   name: my-scheduler-e-role
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/status", "nodes"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods", "pods/status", "pods/binding", "nodes"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["bindings"]
     verbs: ["create"]
@@ -57,6 +57,7 @@ spec:
         app: my-scheduler-e
     spec:
       serviceAccountName: my-scheduler-e
+      nodeName: sched-lab-control-plane 
       containers:
         - name: scheduler-e
           image: my-py-scheduler-e:latest
